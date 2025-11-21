@@ -12,6 +12,7 @@ import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 import com.example.health_check_app.models.SensorData;
+import com.example.health_check_app.mqtt.MqttManager;
 import com.google.android.material.bottomnavigation.BottomNavigationView;
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
 
@@ -38,9 +39,12 @@ public class MainActivity extends AppCompatActivity {
     private Handler uiUpdateHandler;
     private Runnable uiUpdateRunnable;
     
+    private MqttManager mqttManager;
+    
     // Thresholds (will be loaded from preferences in SettingsActivity)
     private int heartRateMaxThreshold = 100;
     private float temperatureMaxThreshold = 37.3f;
+    private boolean vibrationEnabled = true;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -50,6 +54,7 @@ public class MainActivity extends AppCompatActivity {
         initializeViews();
         setupListeners();
         setupUIUpdater();
+        setupMqtt();
         
         // Initialize with default data
         currentData = new SensorData();
@@ -100,16 +105,64 @@ public class MainActivity extends AppCompatActivity {
         uiUpdateRunnable = new Runnable() {
             @Override
             public void run() {
-                // This will be called every 500ms to update UI
-                // In real implementation, this would receive data from MQTT
-                
-                // Simulate data updates (for demonstration)
-                simulateDataUpdate();
+                // UI updates are now handled by MQTT callbacks
+                // This handler is kept for potential periodic updates
                 
                 // Schedule next update
-                uiUpdateHandler.postDelayed(this, 500);
+                uiUpdateHandler.postDelayed(this, 1000);
             }
         };
+    }
+    
+    private void setupMqtt() {
+        mqttManager = new MqttManager(this);
+        
+        mqttManager.setConnectionListener(new MqttManager.MqttConnectionListener() {
+            @Override
+            public void onConnected() {
+                runOnUiThread(() -> {
+                    updateConnectionStatus(true);
+                });
+            }
+            
+            @Override
+            public void onDisconnected() {
+                runOnUiThread(() -> {
+                    updateConnectionStatus(false);
+                });
+            }
+            
+            @Override
+            public void onConnectionFailed(String error) {
+                runOnUiThread(() -> {
+                    updateConnectionStatus(false);
+                    Toast.makeText(MainActivity.this, "连接失败: " + error, Toast.LENGTH_SHORT).show();
+                });
+            }
+        });
+        
+        mqttManager.setDataListener(new MqttManager.MqttDataListener() {
+            @Override
+            public void onSensorDataReceived(SensorData data) {
+                runOnUiThread(() -> {
+                    currentData = data;
+                    updateUI(data);
+                    checkThresholds(data);
+                });
+            }
+            
+            @Override
+            public void onBatteryLevelReceived(int level) {
+                runOnUiThread(() -> {
+                    currentData.setBatteryLevel(level);
+                    batteryLevel.setText(String.format("%d%%", level));
+                });
+            }
+        });
+        
+        // Auto-connect with demo credentials
+        // In production, these should be stored securely and configured in settings
+        // mqttManager.connect("username", "password");
     }
     
     private void startMeasurement() {
@@ -119,24 +172,8 @@ public class MainActivity extends AppCompatActivity {
         }
         
         Toast.makeText(this, "开始测量...", Toast.LENGTH_SHORT).show();
-        // In real implementation, send MQTT command to microcontroller
-        // publishMqttMessage("device/command", "START_MEASURE");
-    }
-    
-    private void simulateDataUpdate() {
-        // This is a simulation - in real implementation, data comes from MQTT
-        // Uncomment below to see simulation
-        /*
-        currentData.setHeartRate(70 + (int)(Math.random() * 20));
-        currentData.setBloodOxygen(95 + (int)(Math.random() * 5));
-        currentData.setBodyTemperature(36.0f + (float)(Math.random() * 2));
-        currentData.setEnvironmentTemperature(20.0f + (float)(Math.random() * 10));
-        currentData.setHumidity(50 + (int)(Math.random() * 30));
-        currentData.setSteps(currentData.getSteps() + (int)(Math.random() * 5));
-        
-        updateUI(currentData);
-        checkThresholds(currentData);
-        */
+        // Send MQTT command to microcontroller
+        mqttManager.publishCommand("START_MEASURE");
     }
     
     private void updateUI(SensorData data) {
@@ -175,9 +212,11 @@ public class MainActivity extends AppCompatActivity {
             switch (data.getMotionStatus()) {
                 case SEDENTARY:
                     motionStatusValue.setText(R.string.sedentary);
+                    motionStatusValue.setTextColor(ContextCompat.getColor(this, R.color.text_primary));
                     break;
                 case WALKING:
                     motionStatusValue.setText(R.string.walking);
+                    motionStatusValue.setTextColor(ContextCompat.getColor(this, R.color.status_normal));
                     break;
                 case FALL_DETECTED:
                     motionStatusValue.setText(R.string.fall_detected);
@@ -212,19 +251,31 @@ public class MainActivity extends AppCompatActivity {
         // Check for fall detection
         if (data.getMotionStatus() == SensorData.MotionStatus.FALL_DETECTED) {
             showAlertDialog(getString(R.string.alert_title), getString(R.string.alert_fall));
-            vibratePhone();
+            if (vibrationEnabled) {
+                vibratePhone();
+            }
+            // Send command to microcontroller to trigger buzzer
+            mqttManager.publishCommand("ALARM_FALL");
         }
         
         // Check for high temperature
         if (data.getBodyTemperature() > temperatureMaxThreshold) {
             showAlertDialog(getString(R.string.alert_title), getString(R.string.alert_fever));
-            vibratePhone();
+            if (vibrationEnabled) {
+                vibratePhone();
+            }
+            // Send command to microcontroller to trigger buzzer
+            mqttManager.publishCommand("ALARM_FEVER");
         }
         
         // Check for high heart rate
         if (data.getHeartRate() > heartRateMaxThreshold) {
             showAlertDialog(getString(R.string.alert_title), getString(R.string.alert_high_heart_rate));
-            vibratePhone();
+            if (vibrationEnabled) {
+                vibratePhone();
+            }
+            // Send command to microcontroller to trigger buzzer
+            mqttManager.publishCommand("ALARM_HEART_RATE");
         }
     }
     
@@ -243,7 +294,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
     
-    public void updateConnectionStatus(boolean connected) {
+    private void updateConnectionStatus(boolean connected) {
         isConnected = connected;
         if (connected) {
             connectionStatus.setText(R.string.connected);
@@ -257,10 +308,18 @@ public class MainActivity extends AppCompatActivity {
         }
     }
     
+    private void loadSettings() {
+        android.content.SharedPreferences prefs = getSharedPreferences("HealthCheckSettings", MODE_PRIVATE);
+        heartRateMaxThreshold = prefs.getInt("heartRateMax", 100);
+        temperatureMaxThreshold = prefs.getFloat("temperatureMax", 37.3f);
+        vibrationEnabled = prefs.getBoolean("vibrationFeedback", true);
+    }
+    
     @Override
     protected void onResume() {
         super.onResume();
         bottomNavigation.setSelectedItemId(R.id.nav_monitor);
+        loadSettings();
         // Start UI updates
         uiUpdateHandler.post(uiUpdateRunnable);
     }
@@ -270,5 +329,13 @@ public class MainActivity extends AppCompatActivity {
         super.onPause();
         // Stop UI updates
         uiUpdateHandler.removeCallbacks(uiUpdateRunnable);
+    }
+    
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (mqttManager != null) {
+            mqttManager.disconnect();
+        }
     }
 }
