@@ -29,7 +29,7 @@ public class MainActivity extends AppCompatActivity {
     private TextView connectionStatus;
     private ImageView connectionIcon;
     private TextView batteryLevel;
-    private ImageView heartRateIcon;
+    private TextView heartRateIcon;
     
     private FloatingActionButton startMeasureFab;
     private BottomNavigationView bottomNavigation;
