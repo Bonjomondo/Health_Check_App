@@ -56,6 +56,11 @@ public class BluetoothManager {
         this.context = context;
         this.bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
         this.mainHandler = new Handler(Looper.getMainLooper());
+        
+        // Log if Bluetooth is not available
+        if (this.bluetoothAdapter == null) {
+            Log.w(TAG, "Bluetooth is not available on this device");
+        }
     }
     
     public void setConnectionListener(BluetoothConnectionListener listener) {
