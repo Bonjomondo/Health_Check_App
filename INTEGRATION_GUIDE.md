@@ -1,297 +1,363 @@
-# 集成指南 - Integration Guide
+# 蓝牙通信集成指南
 
-## 快速开始
+本文档提供了如何将单片机系统与Android应用通过蓝牙进行集成的详细说明。
 
-### 1. 阿里云IoT配置
+## 硬件要求
 
-#### 创建产品和设备
-1. 登录阿里云IoT平台控制台
-2. 创建产品（产品类型：直连设备）
-3. 创建设备，获取三元组信息：
-   - ProductKey
-   - DeviceName  
-   - DeviceSecret
+### Android端
+- Android 7.0 (API 24) 或更高版本
+- 支持蓝牙的设备
+- 建议使用Android 12+以获得最佳兼容性
 
-#### 生成MQTT连接参数
-```
-Broker: ${ProductKey}.iot-as-mqtt.cn-shanghai.aliyuncs.com:1883
-ClientID: ${ClientId}|securemode=3,signmethod=hmacsha1|
-Username: ${DeviceName}&${ProductKey}
-Password: sign_hmac(DeviceSecret, content)
-```
+### 单片机端
+- Arduino/ESP32或其他支持串口通信的MCU
+- HC-05或HC-06蓝牙模块
+- 传感器模块：
+  - MAX30102 (心率/血氧)
+  - DS18B20 (体温)
+  - DHT11/DHT22 (温湿度)
+  - MPU6050 (运动检测)
+- 蜂鸣器（用于报警）
 
-详细算法参考：https://help.aliyun.com/document_detail/73742.html
+## 蓝牙模块配置
 
-### 2. 配置App
+### HC-05/HC-06 初始配置
 
-#### 方法一：代码配置（快速测试）
-编辑 `app/src/main/java/com/example/health_check_app/mqtt/MqttManager.java`
+1. **连接AT模式**
+   - HC-05: 需要将KEY引脚拉高到3.3V才能进入AT模式
+   - HC-06: 直接发送AT命令即可，无需特殊操作
+   ```
+   VCC → 3.3V
+   GND → GND
+   TXD → RX (MCU)
+   RXD → TX (MCU)
+   KEY → 3.3V (仅HC-05需要，进入AT模式)
+   ```
 
-```java
-// 替换为你的MQTT Broker地址
-private static final String MQTT_BROKER = "tcp://YOUR_PRODUCT_KEY.iot-as-mqtt.cn-shanghai.aliyuncs.com:1883";
-```
+2. **配置波特率**
+   ```
+   AT+UART=9600,0,0    # 设置波特率为9600
+   或
+   AT+UART=115200,0,0  # 设置波特率为115200
+   ```
 
-在 `MainActivity.java` 的 `setupMqtt()` 方法中启用连接：
-```java
-// 取消注释并填入你的认证信息
-mqttManager.connect("YOUR_USERNAME", "YOUR_PASSWORD");
-```
+3. **设置设备名称**
+   ```
+   AT+NAME=HealthGuard  # 设置蓝牙名称
+   ```
 
-#### 方法二：通过设置页面配置（推荐）
-未来可以在SettingsActivity中添加MQTT配置界面，让用户输入：
-- Broker地址
-- 用户名
-- 密码
+4. **设置配对密码**（可选）
+   ```
+   AT+PSWD=1234  # 设置密码为1234
+   ```
 
-### 3. 单片机端配置
+## 单片机端代码实现
 
-#### ESP8266/ESP32 MQTT客户端配置
+### 1. 基础串口配置
 
 ```cpp
-#include <PubSubClient.h>
-#include <ESP8266WiFi.h>
-
-// WiFi配置
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
-
-// MQTT配置
-const char* mqtt_server = "YOUR_PRODUCT_KEY.iot-as-mqtt.cn-shanghai.aliyuncs.com";
-const int mqtt_port = 1883;
-const char* mqtt_user = "YOUR_USERNAME";
-const char* mqtt_password = "YOUR_PASSWORD";
-
-WiFiClient espClient;
-PubSubClient client(espClient);
-
+// Arduino示例
 void setup() {
-  Serial.begin(115200);
+  // 初始化串口（与蓝牙模块通信）
+  Serial.begin(9600);  // 或115200，与蓝牙模块配置一致
   
-  // 连接WiFi
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  // 初始化传感器
+  initSensors();
+}
+```
+
+### 2. JSON数据发送
+
+```cpp
+#include <ArduinoJson.h>
+
+void sendSensorData() {
+  StaticJsonDocument<256> doc;
+  
+  // 读取传感器数据
+  doc["heartRate"] = readHeartRate();
+  doc["bloodOxygen"] = readBloodOxygen();
+  doc["bodyTemperature"] = readBodyTemp();
+  doc["environmentTemperature"] = readEnvTemp();
+  doc["humidity"] = readHumidity();
+  doc["motionStatus"] = getMotionStatus();
+  doc["steps"] = getStepCount();
+  doc["battery"] = getBatteryLevel();
+  doc["timestamp"] = millis();
+  
+  // 序列化并发送
+  serializeJson(doc, Serial);
+  Serial.println();  // 重要：发送换行符
+}
+```
+
+### 3. 接收命令
+
+```cpp
+void loop() {
+  // 检查是否有命令
+  if (Serial.available() > 0) {
+    String command = Serial.readStringUntil('\n');
+    processCommand(command);
   }
   
-  // 配置MQTT
-  client.setServer(mqtt_server, mqtt_port);
-  client.setCallback(callback);
+  // 定期发送数据（每秒一次）
+  static unsigned long lastSend = 0;
+  if (millis() - lastSend >= 1000) {
+    sendSensorData();
+    lastSend = millis();
+  }
+}
+
+void processCommand(String jsonStr) {
+  StaticJsonDocument<128> doc;
+  DeserializationError error = deserializeJson(doc, jsonStr);
+  
+  if (error) {
+    return;  // 解析失败
+  }
+  
+  String cmd = doc["command"];
+  
+  if (cmd == "START_MEASURE") {
+    startMeasurement();
+  } else if (cmd == "ALARM_FALL") {
+    triggerBuzzer(1000);  // 响1秒
+  } else if (cmd == "ALARM_FEVER") {
+    triggerBuzzer(2000);  // 响2秒
+  } else if (cmd == "ALARM_HEART_RATE") {
+    triggerBuzzer(1500);  // 响1.5秒
+  }
+}
+```
+
+### 4. 完整示例
+
+```cpp
+#include <ArduinoJson.h>
+#include <Wire.h>
+
+// 蜂鸣器引脚
+#define BUZZER_PIN 9
+
+// 传感器变量
+int heartRate = 0;
+int bloodOxygen = 0;
+float bodyTemp = 0.0;
+float envTemp = 0.0;
+int humidity = 0;
+String motionStatus = "SEDENTARY";
+int steps = 0;
+int battery = 100;
+
+void setup() {
+  Serial.begin(9600);
+  
+  // 初始化I2C
+  Wire.begin();
+  
+  // 初始化传感器
+  // initMAX30102();
+  // initDS18B20();
+  // initDHT();
+  // initMPU6050();
+  
+  // 蜂鸣器引脚
+  pinMode(BUZZER_PIN, OUTPUT);
 }
 
 void loop() {
-  if (!client.connected()) {
-    reconnect();
-  }
-  client.loop();
+  // 处理接收的命令
+  handleCommands();
   
   // 定期发送传感器数据
-  publishSensorData();
-  delay(500);
+  static unsigned long lastSend = 0;
+  if (millis() - lastSend >= 1000) {
+    sendSensorData();
+    lastSend = millis();
+  }
+  
+  // 读取传感器（根据实际情况调整频率）
+  updateSensorData();
 }
 
-void reconnect() {
-  while (!client.connected()) {
-    if (client.connect("ESP8266Client", mqtt_user, mqtt_password)) {
-      Serial.println("Connected to MQTT");
-      client.subscribe("device/command");
-    } else {
-      delay(5000);
+void handleCommands() {
+  if (Serial.available() > 0) {
+    String jsonStr = Serial.readStringUntil('\n');
+    
+    StaticJsonDocument<128> doc;
+    DeserializationError error = deserializeJson(doc, jsonStr);
+    
+    if (!error) {
+      String cmd = doc["command"];
+      processCommand(cmd);
     }
   }
 }
 
-void callback(char* topic, byte* payload, unsigned int length) {
-  String message = "";
-  for (int i = 0; i < length; i++) {
-    message += (char)payload[i];
-  }
+void sendSensorData() {
+  StaticJsonDocument<256> doc;
   
-  // 解析JSON命令
-  if (message.indexOf("START_MEASURE") >= 0) {
-    startMeasurement();
-  } else if (message.indexOf("ALARM") >= 0) {
-    triggerBuzzer();
+  doc["heartRate"] = heartRate;
+  doc["bloodOxygen"] = bloodOxygen;
+  doc["bodyTemperature"] = bodyTemp;
+  doc["environmentTemperature"] = envTemp;
+  doc["humidity"] = humidity;
+  doc["motionStatus"] = motionStatus;
+  doc["steps"] = steps;
+  doc["battery"] = battery;
+  doc["timestamp"] = millis();
+  
+  serializeJson(doc, Serial);
+  Serial.println();
+}
+
+void processCommand(String cmd) {
+  if (cmd == "START_MEASURE") {
+    // 开始测量逻辑
+  } else if (cmd == "ALARM_FALL") {
+    triggerBuzzer(1000);
+  } else if (cmd == "ALARM_FEVER") {
+    triggerBuzzer(2000);
+  } else if (cmd == "ALARM_HEART_RATE") {
+    triggerBuzzer(1500);
   }
 }
 
-void publishSensorData() {
-  // 读取传感器数据
-  int heartRate = readHeartRate();
-  int bloodOxygen = readBloodOxygen();
-  float bodyTemp = readBodyTemperature();
-  float envTemp = readEnvironmentTemperature();
-  int humidity = readHumidity();
-  String motionStatus = getMotionStatus();
-  int steps = getSteps();
-  int battery = getBatteryLevel();
-  
-  // 构建JSON
-  String json = "{";
-  json += "\"heartRate\":" + String(heartRate) + ",";
-  json += "\"bloodOxygen\":" + String(bloodOxygen) + ",";
-  json += "\"bodyTemperature\":" + String(bodyTemp) + ",";
-  json += "\"environmentTemperature\":" + String(envTemp) + ",";
-  json += "\"humidity\":" + String(humidity) + ",";
-  json += "\"motionStatus\":\"" + motionStatus + "\",";
-  json += "\"steps\":" + String(steps) + ",";
-  json += "\"battery\":" + String(battery) + ",";
-  json += "\"timestamp\":" + String(millis());
-  json += "}";
-  
-  // 发布到MQTT
-  client.publish("sensor/data", json.c_str());
+void triggerBuzzer(int duration) {
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(duration);
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+void updateSensorData() {
+  // 实际实现中，这里应该读取真实的传感器数据
+  // heartRate = readMAX30102_HeartRate();
+  // bloodOxygen = readMAX30102_SpO2();
+  // bodyTemp = readDS18B20();
+  // envTemp = readDHT_Temperature();
+  // humidity = readDHT_Humidity();
+  // motionStatus = analyzeMotion();
+  // steps = getStepCount();
+  // battery = readBatteryLevel();
 }
 ```
 
-### 4. 传感器接线参考
+## Android端使用指南
 
-#### MAX30102 (心率/血氧)
-```
-MAX30102  →  ESP8266/ESP32
-VIN       →  3.3V
-GND       →  GND
-SDA       →  D2 (GPIO4)
-SCL       →  D1 (GPIO5)
-INT       →  D3 (GPIO0)
-```
+### 1. 权限配置
 
-#### DS18B20 (体温)
-```
-DS18B20   →  ESP8266/ESP32
-VDD       →  3.3V
-GND       →  GND
-DQ        →  D4 (GPIO2) + 4.7kΩ上拉电阻到3.3V
+在 `AndroidManifest.xml` 中已配置必要的权限：
+```xml
+<uses-permission android:name="android.permission.BLUETOOTH" />
+<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+<uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 ```
 
-#### DHT11/DHT22 (温湿度)
+### 2. 配对蓝牙设备
+
+在使用应用之前：
+1. 打开手机蓝牙设置
+2. 搜索附近的蓝牙设备
+3. 找到 "HealthGuard" 或您设置的设备名称
+4. 点击配对（如果设置了密码，输入密码）
+
+### 3. 在应用中连接
+
+1. 打开应用
+2. 进入"设置"页面
+3. 点击"扫描设备"按钮
+4. 从列表中选择已配对的设备
+5. 等待连接成功提示
+
+### 4. 测试连接
+
+连接成功后：
+- 顶部状态栏应显示"已连接"（绿色）
+- 开始接收传感器数据
+- 数值会实时更新
+
+## 故障排除
+
+### 问题1: 无法找到蓝牙设备
+
+**解决方案:**
+- 确保蓝牙模块已通电
+- 检查蓝牙模块LED是否闪烁
+- 确保设备未被其他应用连接
+- 在系统蓝牙设置中先配对设备
+
+### 问题2: 连接失败
+
+**解决方案:**
+- 检查波特率是否匹配
+- 确认蓝牙模块工作正常
+- 重启蓝牙模块和应用
+- 在系统设置中取消配对后重新配对
+
+### 问题3: 接收不到数据
+
+**解决方案:**
+- 检查单片机串口输出
+- 使用串口调试工具验证数据格式
+- 确认JSON格式正确（包含换行符）
+- 检查数据发送频率（建议1Hz）
+
+### 问题4: 数据解析错误
+
+**解决方案:**
+- 确保JSON格式正确
+- 检查字段名称是否匹配
+- 验证数据类型（整数、浮点数）
+- 查看Android日志输出
+
+## 数据格式规范
+
+### 传感器数据 (MCU → App)
+```json
+{
+  "heartRate": 75,           // 整数，单位BPM
+  "bloodOxygen": 98,          // 整数，百分比
+  "bodyTemperature": 36.5,    // 浮点数，单位℃
+  "environmentTemperature": 25.0,  // 浮点数，单位℃
+  "humidity": 60,             // 整数，百分比
+  "motionStatus": "SEDENTARY", // 字符串: SEDENTARY/WALKING/FALL_DETECTED
+  "steps": 1234,              // 整数
+  "battery": 85,              // 整数，百分比
+  "timestamp": 1637500000000  // 长整数，毫秒时间戳
+}
 ```
-DHT       →  ESP8266/ESP32
-VCC       →  3.3V
-GND       →  GND
-DATA      →  D5 (GPIO14) + 10kΩ上拉电阻到3.3V
+
+### 控制命令 (App → MCU)
+```json
+{
+  "command": "START_MEASURE",  // 字符串
+  "timestamp": 1637500000000   // 长整数
+}
 ```
 
-#### MPU6050 (运动检测)
-```
-MPU6050   →  ESP8266/ESP32
-VCC       →  3.3V
-GND       →  GND
-SDA       →  D2 (GPIO4)
-SCL       →  D1 (GPIO5)
-INT       →  D6 (GPIO12)
-```
+## 性能建议
 
-#### 蜂鸣器
-```
-蜂鸣器     →  ESP8266/ESP32
-+         →  D7 (GPIO13) 通过三极管
--         →  GND
-```
+1. **数据发送频率**: 建议1Hz (每秒一次)，避免过于频繁导致卡顿
+2. **JSON大小**: 保持在256字节以内，确保传输效率
+3. **缓冲区管理**: 及时清空串口缓冲区，避免数据积压
+4. **错误处理**: 实现超时和重传机制
+5. **电源管理**: 合理使用睡眠模式节省电量
 
-### 5. 测试步骤
+## 参考资源
 
-#### 单元测试
-1. **测试WiFi连接**
-   ```cpp
-   Serial.println(WiFi.localIP());
-   ```
+- [HC-05 蓝牙模块文档](https://www.electronicwings.com/sensors-modules/hc-05-bluetooth-module)
+- [ArduinoJson 库文档](https://arduinojson.org/)
+- [Android Bluetooth 官方文档](https://developer.android.com/guide/topics/connectivity/bluetooth)
 
-2. **测试MQTT连接**
-   ```cpp
-   if (client.connected()) {
-     Serial.println("MQTT Connected");
-   }
-   ```
+## 技术支持
 
-3. **测试传感器读取**
-   - MAX30102: 读取心率和血氧
-   - DS18B20: 读取体温
-   - DHT: 读取温湿度
-   - MPU6050: 读取加速度
-
-4. **测试MQTT发布**
-   ```cpp
-   client.publish("sensor/data", "{\"test\":\"data\"}");
-   ```
-
-5. **测试MQTT订阅**
-   - 发送命令测试蜂鸣器是否响应
-
-#### App测试
-1. 安装APK到Android设备
-2. 查看日志确认MQTT连接状态
-   ```bash
-   adb logcat | grep MqttManager
-   ```
-3. 确认UI能接收并显示传感器数据
-4. 测试阈值报警功能
-5. 测试命令下发（开始测量、报警）
-
-### 6. 故障排查
-
-#### MQTT连接失败
-- 检查网络连接
-- 验证Broker地址和端口
-- 确认用户名和密码正确
-- 查看阿里云IoT设备状态
-
-#### 数据不更新
-- 检查单片机MQTT发布是否成功
-- 确认Topic名称一致
-- 验证JSON格式正确
-- 查看App日志是否有解析错误
-
-#### 传感器读数异常
-- 检查传感器接线
-- 验证I2C地址（MAX30102: 0x57, MPU6050: 0x68）
-- 确认上拉电阻配置正确
-- 使用I2C扫描程序检测设备
-
-#### 报警不触发
-- 检查阈值设置
-- 确认震动权限已授予
-- 验证MQTT命令发送成功
-- 检查单片机端命令解析逻辑
-
-### 7. 生产部署建议
-
-1. **安全性**
-   - 使用SSL/TLS加密MQTT连接
-   - 定期更换MQTT密码
-   - 启用阿里云IoT的设备认证
-
-2. **稳定性**
-   - 实现MQTT自动重连
-   - 添加数据缓存机制
-   - 异常情况下的降级策略
-
-3. **性能**
-   - 优化传感器采样频率
-   - 减少MQTT消息发送频率
-   - 启用消息压缩
-
-4. **用户体验**
-   - 添加网络状态检测
-   - 提供离线模式
-   - 数据本地缓存
-
-## 常见问题 FAQ
-
-**Q: 为什么连接一直失败？**
-A: 请检查阿里云IoT控制台设备状态，确认三元组信息正确，并检查签名算法。
-
-**Q: 数据延迟很大怎么办？**
-A: 检查网络质量，考虑使用更近的Region，或优化JSON数据大小。
-
-**Q: 如何实现多设备连接？**
-A: 每个设备使用唯一的ClientID，App端可以订阅多个设备的Topic。
-
-**Q: 可以使用其他MQTT Broker吗？**
-A: 可以，修改MqttManager中的MQTT_BROKER地址即可，支持标准MQTT协议的Broker都可以。
-
-## 联系支持
-
-- 项目Issues: https://github.com/Bonjomondo/Health_Check_App/issues
-- 阿里云IoT文档: https://help.aliyun.com/product/30520.html
+如遇到问题，请检查：
+1. 硬件连接是否正确
+2. 蓝牙模块配置是否正确
+3. 代码中的波特率设置
+4. JSON数据格式
+5. Android日志输出

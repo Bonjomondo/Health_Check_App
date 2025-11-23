@@ -39,8 +39,6 @@ dependencies {
     implementation(libs.constraintlayout)
     implementation(libs.viewpager2)
     implementation(libs.mpandroidchart)
-    implementation(libs.mqtt.client)
-    implementation(libs.mqtt.android.service)
     testImplementation(libs.junit)
     androidTestImplementation(libs.ext.junit)
     androidTestImplementation(libs.espresso.core)

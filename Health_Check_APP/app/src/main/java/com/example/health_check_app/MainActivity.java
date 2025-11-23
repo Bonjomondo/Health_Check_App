@@ -12,7 +12,7 @@ import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 import com.example.health_check_app.models.SensorData;
-import com.example.health_check_app.mqtt.MqttManager;
+import com.example.health_check_app.bluetooth.BluetoothManager;
 import com.google.android.material.bottomnavigation.BottomNavigationView;
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
 
@@ -39,7 +39,7 @@ public class MainActivity extends AppCompatActivity {
     private Handler uiUpdateHandler;
     private Runnable uiUpdateRunnable;
     
-    private MqttManager mqttManager;
+    private BluetoothManager bluetoothManager;
     
     // Thresholds (will be loaded from preferences in SettingsActivity)
     private int heartRateMaxThreshold = 100;
@@ -54,7 +54,7 @@ public class MainActivity extends AppCompatActivity {
         initializeViews();
         setupListeners();
         setupUIUpdater();
-        setupMqtt();
+        setupBluetooth();
         
         // Initialize with default data
         currentData = new SensorData();
@@ -114,10 +114,10 @@ public class MainActivity extends AppCompatActivity {
         };
     }
     
-    private void setupMqtt() {
-        mqttManager = new MqttManager(this);
+    private void setupBluetooth() {
+        bluetoothManager = new BluetoothManager(this);
         
-        mqttManager.setConnectionListener(new MqttManager.MqttConnectionListener() {
+        bluetoothManager.setConnectionListener(new BluetoothManager.BluetoothConnectionListener() {
             @Override
             public void onConnected() {
                 runOnUiThread(() -> {
@@ -141,7 +141,7 @@ public class MainActivity extends AppCompatActivity {
             }
         });
         
-        mqttManager.setDataListener(new MqttManager.MqttDataListener() {
+        bluetoothManager.setDataListener(new BluetoothManager.BluetoothDataListener() {
             @Override
             public void onSensorDataReceived(SensorData data) {
                 runOnUiThread(() -> {
@@ -160,9 +160,8 @@ public class MainActivity extends AppCompatActivity {
             }
         });
         
-        // Auto-connect with demo credentials
-        // In production, these should be stored securely and configured in settings
-        // mqttManager.connect("username", "password");
+        // Auto-connect to saved device if available
+        loadAndConnectDevice();
     }
     
     private void startMeasurement() {
@@ -172,8 +171,8 @@ public class MainActivity extends AppCompatActivity {
         }
         
         Toast.makeText(this, "开始测量...", Toast.LENGTH_SHORT).show();
-        // Send MQTT command to microcontroller
-        mqttManager.publishCommand("START_MEASURE");
+        // Send Bluetooth command to microcontroller
+        bluetoothManager.sendCommand("START_MEASURE");
     }
     
     private void updateUI(SensorData data) {
@@ -255,7 +254,7 @@ public class MainActivity extends AppCompatActivity {
                 vibratePhone();
             }
             // Send command to microcontroller to trigger buzzer
-            mqttManager.publishCommand("ALARM_FALL");
+            bluetoothManager.sendCommand("ALARM_FALL");
         }
         
         // Check for high temperature
@@ -265,7 +264,7 @@ public class MainActivity extends AppCompatActivity {
                 vibratePhone();
             }
             // Send command to microcontroller to trigger buzzer
-            mqttManager.publishCommand("ALARM_FEVER");
+            bluetoothManager.sendCommand("ALARM_FEVER");
         }
         
         // Check for high heart rate
@@ -275,7 +274,7 @@ public class MainActivity extends AppCompatActivity {
                 vibratePhone();
             }
             // Send command to microcontroller to trigger buzzer
-            mqttManager.publishCommand("ALARM_HEART_RATE");
+            bluetoothManager.sendCommand("ALARM_HEART_RATE");
         }
     }
     
@@ -315,6 +314,16 @@ public class MainActivity extends AppCompatActivity {
         vibrationEnabled = prefs.getBoolean("vibrationFeedback", true);
     }
     
+    private void loadAndConnectDevice() {
+        android.content.SharedPreferences prefs = getSharedPreferences("HealthCheckSettings", MODE_PRIVATE);
+        String savedDeviceAddress = prefs.getString("connectedDeviceAddress", null);
+        
+        if (savedDeviceAddress != null && bluetoothManager.isBluetoothEnabled()) {
+            // Auto-connect to the previously connected device
+            bluetoothManager.connect(savedDeviceAddress);
+        }
+    }
+    
     @Override
     protected void onResume() {
         super.onResume();
@@ -334,8 +343,8 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (mqttManager != null) {
-            mqttManager.disconnect();
+        if (bluetoothManager != null) {
+            bluetoothManager.disconnect();
         }
     }
 }
