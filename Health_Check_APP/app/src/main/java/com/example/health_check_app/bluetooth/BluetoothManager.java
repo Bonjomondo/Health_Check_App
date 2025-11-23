@@ -16,10 +16,8 @@ import com.example.health_check_app.models.SensorData;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.util.Set;
 import java.util.UUID;
@@ -167,8 +165,9 @@ public class BluetoothManager {
     private void startListening() {
         stopWorker = false;
         workerThread = new Thread(() -> {
-            BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
             StringBuilder messageBuffer = new StringBuilder();
+            int braceDepth = 0;
+            boolean inJson = false;
             
             while (!Thread.currentThread().isInterrupted() && !stopWorker && isConnected) {
                 try {
@@ -181,21 +180,31 @@ public class BluetoothManager {
                     
                     char character = (char) data;
                     
-                    // Check for JSON object boundaries
+                    // Check for JSON object boundaries with brace depth tracking
                     if (character == '{') {
-                        messageBuffer = new StringBuilder();
+                        if (!inJson) {
+                            messageBuffer = new StringBuilder();
+                            inJson = true;
+                            braceDepth = 0;
+                        }
+                        braceDepth++;
                         messageBuffer.append(character);
                     } else if (character == '}') {
                         messageBuffer.append(character);
-                        String message = messageBuffer.toString();
+                        braceDepth--;
                         
-                        // Process the complete JSON message
-                        if (message.startsWith("{")) {
-                            handleReceivedData(message);
+                        if (braceDepth == 0 && inJson) {
+                            String message = messageBuffer.toString();
+                            
+                            // Process the complete JSON message
+                            if (message.startsWith("{")) {
+                                handleReceivedData(message);
+                            }
+                            
+                            messageBuffer = new StringBuilder();
+                            inJson = false;
                         }
-                        
-                        messageBuffer = new StringBuilder();
-                    } else if (messageBuffer.length() > 0) {
+                    } else if (inJson) {
                         messageBuffer.append(character);
                     }
                     
